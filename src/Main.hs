@@ -34,5 +34,7 @@ dumpChunk handle = readChunkData handle (ChunkLocation 166 1) >>= \case
 main :: IO ()
 main =
     withFile "example/region/r.-1.-1.mca" ReadMode $ \handle -> do
-        header <- readHeader handle
-        putStrLn $ visualiseChunks header
+        --header <- readHeader handle
+        --putStrLn $ visualiseChunks header
+        chunkMap <- readChunkMap handle
+        print chunkMap
