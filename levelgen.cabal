@@ -18,6 +18,8 @@ cabal-version:       >=1.10
 executable levelgen
   main-is:             Main.hs
   other-modules:       Anvil
+                       Utils
+                       Data.NBT.Lens
   -- other-extensions:
   build-depends:       array,
                        base,
@@ -36,7 +38,8 @@ executable levelgen
                        text-show,
                        time,
                        vector,
-                       zlib
+                       zlib,
+                       lens
 
   hs-source-dirs:      src
   default-language:    Haskell2010

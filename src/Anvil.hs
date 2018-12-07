@@ -322,9 +322,11 @@ writeChunkMap h chunkMap = do
   -- chunks' <- mapM (\(chunkPos, (cd, modTime)) -> do i <- writeChunkData h cd ; pure (chunkPos, (i, modTime))) chunks
   pure ()
 
+writeRegion :: Handle -> Region -> IO ()
+writeRegion h region = writeChunkMap h $ Map.map (\nbt -> (compressChunkData nbt, 0)) region
 
-readChunkMap :: Handle -> IO Region
-readChunkMap h = do
+readRegion :: Handle -> IO Region
+readRegion h = do
   chunkMap <- newIORef Map.empty
   hSeek h AbsoluteSeek 0
   let producer = fromHandle h
