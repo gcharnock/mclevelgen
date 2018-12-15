@@ -2,24 +2,33 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-import Data.Int
-import Data.Array
+import           Data.Int
+import           Data.Array
 import           Control.Monad
-import Control.Lens
+import           Control.Lens
 import qualified Codec.Compression.GZip        as GZip
 import qualified Codec.Compression.Zlib        as Zlib
 import qualified Data.ByteString.Lazy          as BL
 import           Data.NBT
 import           Data.NBT.Lens
 import           Data.Serialize
-import           Data.Map                      as Map
-import           Anvil
+import qualified Data.Map                      as Map
+import qualified Data.Text                     as T
+import qualified Data.Text.IO                  as T
 import           System.IO
+import qualified Data.Array.Unboxed as UArray
+import qualified Data.Time.Clock.POSIX as POSIX
+
+import           Anvil
+import           Data.Region
+
+showT :: Show a => a -> T.Text
+showT = T.pack . show
 
 dumpChunk :: Handle -> IO ()
 dumpChunk handle = readChunkData handle (ChunkLocation 166 1) >>= \case
     Nothing -> error "readChucnkData"
-    Just ChunkData { chunkDataLength, chunkDataCompression, chunkData } -> do
+    Just ZippedChunkData { chunkDataLength, chunkDataCompression, chunkData } -> do
         let decompress = case chunkDataCompression of
                 Zlib -> Zlib.decompress
                 GZip -> GZip.decompress
@@ -39,27 +48,43 @@ dumpChunk handle = readChunkData handle (ChunkLocation 166 1) >>= \case
             Left  err -> putStrLn err
 
 
-
 changeSection :: NbtContents -> IO NbtContents
-changeSection nbtContents = forOf (lnbtContCompound . compoundName "Y") nbtContents f
+changeSection nbtContents = do
+    nbtContents' <- forOf (compoundName "Palette" . lnbtContList . each . compoundName "Name" . lnbtContString) nbtContents $ \blockName ->
+        if blockName == "minecraft:sandstone"
+            then return "minecraft:cobblestone"
+            else return blockName
+    let blockStates = nbtContents' ^.. compoundName "BlockStates" . lnbtContLongArray
+    forM_ blockStates $ \blockState -> do
+        T.putStrLn $ "blockStatesLength = " <> (showT $ UArray.bounds blockState)
+        T.putStrLn $ "first few  entires = " <> (foldl (\a b -> a <> ", " <> b) "" $ map (showT . (blockState UArray.!)) [0, 1, 2, 3, 4])
+    forOf (compoundName "Y") nbtContents f
+    let palette = fmap (head . (^.. compoundName "Name" . lnbtContString)) $ head $ nbtContents' ^.. compoundName "Palette" . lnbtContList
+    print palette
+    return nbtContents'
   where
     f (ByteTag y) = print y >> (return $ ByteTag y)
-    f tag                   = return tag
+    f tag         = return tag
 
 changeSections :: NbtContents -> IO NbtContents
-changeSections nbtContents = forOf (lnbtContList . each) nbtContents changeSection
+changeSections nbtContents =
+    forOf (lnbtContList . each) nbtContents changeSection
 
-changeChunk' :: NBT -> IO NBT
-changeChunk' nbt = forOf (lnbtContents . lnbtContCompound . compoundName "Level") nbt withLevel
-  where withLevel :: NbtContents -> IO NbtContents
-        withLevel contents = forOf (lnbtContCompound . compoundName "Sections") contents f
-        f :: NbtContents -> IO NbtContents
-        f = changeSections
+changeChunk' :: Chunk -> IO Chunk
+changeChunk' Chunk { chunkNbt = nbt } = do
+    newNbt <- forOf (lnbtContents . compoundName "Level") nbt withLevel
+    now <- POSIX.getPOSIXTime
+    return Chunk { chunkNbt = newNbt, chunkTimestamp = now }
+  where
+    withLevel :: NbtContents -> IO NbtContents
+    withLevel contents = forOf (compoundName "Sections") contents f
+    f :: NbtContents -> IO NbtContents
+    f = changeSections
 
 main :: IO ()
 main = do
     region <- withFile "example/region/r.-1.-1.mca.old" ReadMode
         $ \handle -> readRegion handle
-    region' <- mapM changeChunk' region
+    --newChunkMap <- mapM changeChunk' (regionChunkMap region)
     withFile "example/region/r.-1.-1.mca" WriteMode
-        $ \handle -> writeRegion handle region'
+        $ \handle -> writeRegion handle region -- Region { regionChunkMap = newChunkMap }

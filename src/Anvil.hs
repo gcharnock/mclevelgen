@@ -6,8 +6,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Anvil where
 
+import Control.Monad.IO.Class
 import           Data.IORef
-import           Data.Vector                    ( (!) )
 import           Control.Monad
 import           Control.Monad.State.Strict     ( execStateT
                                                 , modify'
@@ -43,8 +43,9 @@ import           Data.Serialize                 ( Serialize(..)
                                                 , putWord32be
                                                 )
 import           Data.Time.Clock.POSIX          ( POSIXTime )
-import           Data.Vector                    ( Vector )
+import           Data.Vector                    ( Vector, (!) )
 import qualified Data.Vector                   as Vector
+import qualified Data.Vector.Mutable           as MVector
 import           Data.Word                      ( Word8
                                                 , Word32
                                                 )
@@ -56,6 +57,7 @@ import           Pipes.Cereal                   ( decodeGet
                                                 , encodePut
                                                 )
 import           Pipes.Parse                    ( runStateT )
+import qualified Pipes
 import           Pipes                          ( Pipe
                                                 , runEffect
                                                 , (>->)
@@ -65,39 +67,30 @@ import           Pipes                          ( Pipe
                                                 )
 import           System.IO                      ( Handle
                                                 , hSeek
+                                                , hTell
                                                 , SeekMode(AbsoluteSeek)
                                                 )
 
-iforM_ :: Monad m => Vector a -> (Int -> a -> m b) -> m () 
-iforM_ = flip Vector.imapM_
+import Numeric
+import Data.Region
+import Utils
 
-{-
-regionX :: Double -- ^ chunkX
-        -> Int
-regionX x = floor (x / 32.0)
 
-regionY :: Double -- ^ chunkY
-        -> Int
-regionY y = foor (y / 32.0)
--}
+data CompressionType
+  = GZip -- ^ unused in practice
+  | Zlib
+  deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
 
-type ChunkX = Int
-type ChunkZ = Int
-type RegionX = Int
-type RegionZ = Int
+-- | ChunkData
+--
+-- Compressed chunk data
+data ZippedChunkData = ZippedChunkData
+  { chunkDataLength      :: Word32 -- ^ length of chunkData + 1
+  , chunkDataCompression :: CompressionType -- ^ compression type
+  , chunkData            :: ByteString -- ^ compressed data (length - 1)
+  }
+  deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
 
-type ChunkMap = Map (ChunkX, ChunkZ) (ChunkData, POSIXTime)
-type Region = Map (ChunkX, ChunkZ) NBT
-
-regionX :: ChunkX -> RegionX
-regionX x = x `shiftR` 5
-
-regionZ :: ChunkZ -> RegionZ
-regionZ z = z `shiftR` 5
-
-chunkIndex :: (ChunkX, ChunkZ) -> Int
-chunkIndex (x, z) = (x `pmod` 32) + ((z `pmod` 32) * 32)
-  where pmod n m = let n' = n `mod` m in if (n' >= 0) then n' else n' + m
 
 type Word24 = Word32
 
@@ -120,6 +113,9 @@ putChunkLocation (ChunkLocation offset len) = do
   putWord8 (fromIntegral ((offset `shiftR` 8) .&. 0xFF))
   putWord8 (fromIntegral (offset .&. 0xFF))
   putWord8 len
+
+encodeChunkLocation :: Word32 -> Word32 -> Word32
+encodeChunkLocation offset length = (offset .&. 0xFFFFFF) .|. ((length .&.  0xFF) `shiftL` 24)
 
 getChunkLocation :: Get ChunkLocation
 getChunkLocation = do
@@ -199,45 +195,30 @@ emptyAnvilHeader = AnvilHeader
 -- | make an 'AnvilHeader'
 --
 -- assumes the chunks will be written in the same order as they appear in the list
-mkAnvilHeader :: [((ChunkX, ChunkZ), (ChunkData, POSIXTime))] -> AnvilHeader
-mkAnvilHeader chunks =
-  let timestamps' = map (\(i, (_, t)) -> (chunkIndex i, t)) chunks
-      locations'  = snd $ mapAccumL mkLocation 0x2 chunks -- ^ first chunk is at sector 0x2, after the AnvilHeader
-  in  AnvilHeader
-        { locations  = (locations emptyAnvilHeader) Vector.// locations'
-        , timestamps = (timestamps emptyAnvilHeader) Vector.// timestamps'
-        }
- where
-  mkLocation
-    :: Word24
-    -> ((ChunkX, ChunkZ), (ChunkData, POSIXTime))
-    -> (Word24, (Int, ChunkLocation))
-  mkLocation offset (chunkPos, (chunkData, _)) =
-    let paddedSectorLength =
-          ((chunkDataLength chunkData) + 4 + 4095) `div` 4096
-        offset' = offset + paddedSectorLength
-    in  ( offset'
-        , ( chunkIndex chunkPos
-          , ChunkLocation offset (fromIntegral paddedSectorLength)
-          )
-        )
+-- mkAnvilHeader :: Region -> AnvilHeader
+-- mkAnvilHeader Region { regionChunkMap } =
+--   let timestamps' = map (\(i, (_, t)) -> (chunkIndex i, t)) regionChunkMap
+--       locations'  = snd $ mapAccumL mkLocation 0x2 chunks -- ^ first chunk is at sector 0x2, after the AnvilHeader
+--   in  AnvilHeader
+--         { locations  = (locations emptyAnvilHeader) Vector.// locations'
+--         , timestamps = (timestamps emptyAnvilHeader) Vector.// timestamps'
+--         }
+--  where
+--   mkLocation
+--     :: Word24 -> ((ChunkX, ChunkZ), (ZippedChunkData, POSIXTime)) -> (Word24, (Int, ChunkLocation))
+--   mkLocation offset (chunkPos, (chunkData, _)) =
+--     let paddedSectorLength =
+--           ((chunkDataLength chunkData) + 4 + 4095) `div` 4096
+--         offset' = offset + paddedSectorLength
+--     in  ( offset'
+--         , ( chunkIndex chunkPos
+--           , ChunkLocation offset (fromIntegral paddedSectorLength)
+--           )
+--         )
+-- 
 
-data CompressionType
-  = GZip -- ^ unused in practice
-  | Zlib
-  deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
 
--- | ChunkData
---
--- Compressed chunk data
-data ChunkData = ChunkData
-  { chunkDataLength      :: Word32 -- ^ length of chunkData + 1
-  , chunkDataCompression :: CompressionType -- ^ compression type
-  , chunkData            :: ByteString -- ^ compressed data (length - 1)
-  }
-  deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
-
-putChunkData :: ChunkData -> Put
+putChunkData :: ZippedChunkData -> Put
 putChunkData cd = do
   putWord32be (chunkDataLength cd)
   case chunkDataCompression cd of
@@ -245,7 +226,7 @@ putChunkData cd = do
     Zlib -> putWord8 2
   putLazyByteString (chunkData cd)
 
-getChunkData :: Get ChunkData
+getChunkData :: Get ZippedChunkData
 getChunkData = do
   len  <- getWord32be
   comp <- do
@@ -256,9 +237,9 @@ getChunkData = do
       _ ->
         error $ "Unknown compression code in getChunkData: " ++ show (len, w)
   bs <- getLazyByteString (fromIntegral (len - 1))
-  pure $ ChunkData len comp bs
+  pure $ ZippedChunkData len comp bs
 
-instance Serialize ChunkData where
+instance Serialize ZippedChunkData where
   put = putChunkData
   get = getChunkData
 
@@ -273,7 +254,7 @@ readHeader h = do
 
 
 -- | read 'ChunkData' from a Seekable 'Handle'
-readChunkData :: Handle -> ChunkLocation -> IO (Maybe ChunkData)
+readChunkData :: Handle -> ChunkLocation -> IO (Maybe ZippedChunkData)
 readChunkData h chunkLocation
   | chunkLocation == emptyChunkLocation = pure Nothing
   | otherwise = do
@@ -283,47 +264,70 @@ readChunkData h chunkLocation
       (Left  err) -> error err
       (Right cd ) -> pure (Just cd)
 
-writeChunkData :: (Monad m) => Pipe ChunkData B.ByteString m ()
-writeChunkData = do
-  chunkData <- await
-  encodePut (putChunkData chunkData)
-  let padding = 4096 - ((chunkDataLength chunkData + 4) `mod` 4096)
+writeChunkData :: (MonadIO m) => ZippedChunkData -> Pipes.Producer B.ByteString m ()
+writeChunkData zippedChunkData = do
+  encodePut (putChunkData zippedChunkData)
+  let padding = 4096 - ((chunkDataLength zippedChunkData + 4) `mod` 4096)
   when (padding > 0) (yield (B.replicate (fromIntegral padding) 0))
 
-decompressChunkData :: ChunkData -> Either String NBT
+decompressChunkData :: ZippedChunkData -> Either String NBT
 decompressChunkData cd
   | chunkDataCompression cd == Zlib = decodeLazy (decompress (chunkData cd))
   | otherwise = error $ "decompressChunkData not implemented for " ++ show
     (chunkDataCompression cd)
 
 -- | NBT needs to be a Chunk
-compressChunkData :: NBT -> ChunkData
-compressChunkData nbt =
-  let d = compress (encodeLazy nbt)
-  in  ChunkData
+compressChunkData :: Chunk -> ZippedChunkData
+compressChunkData Chunk {chunkNbt} =
+  let d = compress (encodeLazy chunkNbt)
+  in  ZippedChunkData
         { chunkDataLength      = 1 + fromIntegral (LB.length d)
         , chunkDataCompression = Zlib
         , chunkData            = d
         }
 
-writeChunkMap :: Handle -> ChunkMap -> IO ()
-writeChunkMap h chunkMap = do
-  hSeek h AbsoluteSeek 0
-  let chunks = Map.toAscList chunkMap
-  runEffect
-    $   (encodePut (putAnvilHeader (mkAnvilHeader chunks)))
-    >-> (toHandle h)
-  runEffect
-    $   (each $ map (fst . snd) chunks)
-    >-> writeChunkData
-    >-> (toHandle h)
---     runEffect $ (encodePut (putAnvilHeader emptyAnvilHeader)) >-> (toHandle h)
-  -- [(ChunkPos, ChunkData)] -> [(ChunkPos, Length)]
-  -- chunks' <- mapM (\(chunkPos, (cd, modTime)) -> do i <- writeChunkData h cd ; pure (chunkPos, (i, modTime))) chunks
-  pure ()
+chunkCoordsToHeaderLoc :: (ChunkX, ChunkZ) -> Int
+chunkCoordsToHeaderLoc (chunkX, chunkZ) = chunkX + chunkZ * 32
+
+putVecW32 :: Vector Word32 -> Put
+putVecW32 = Vector.mapM_ putWord32be
 
 writeRegion :: Handle -> Region -> IO ()
-writeRegion h region = writeChunkMap h $ Map.map (\nbt -> (compressChunkData nbt, 0)) region
+writeRegion h Region { regionChunkMap } = do
+  let chunks = Map.toAscList regionChunkMap
+  locationBuff <- liftIO $ MVector.new 1024
+  liftIO $ MVector.set locationBuff 0
+  timestampBuff <- liftIO $ MVector.new 1024
+  liftIO $ MVector.set timestampBuff 0
+  let consumer = toHandle h
+  --let header = mkAnvilHeader chunks
+  let byteProducer :: Pipes.Producer B.ByteString IO ()
+      byteProducer = Pipes.for (each chunks) $ \(coords, chunk) -> do
+        let zippedChunkData = compressChunkData chunk
+        let dataLen = chunkDataLength zippedChunkData
+        offset <- liftIO $ hTell h
+        writeChunkData zippedChunkData
+        let offsetSectors = offset `div` 4096
+        let lengthSector = if dataLen `mod` 4096 == 0 then dataLen `div` 4096 else dataLen `div` 4096 + 1
+        let headerLoc = chunkCoordsToHeaderLoc coords
+        let encodedLoc = encodeChunkLocation (fromIntegral offset) lengthSector
+        liftIO $ putStrLn $ "Wrote Chunk..." <> show coords <> " " <> (show dataLen) <> "b" <> 
+                 " headerLoc " <> (show headerLoc) <>
+                 " offset=" <> show offsetSectors <>
+                 " len=" <> show lengthSector <>
+                 " encoded=" <> showHex encodedLoc ""
+        liftIO $ MVector.write locationBuff headerLoc encodedLoc
+
+  hSeek h AbsoluteSeek 8196
+  runEffect $ consumer Pipes.<-< byteProducer
+
+  hSeek h AbsoluteSeek 0
+  locations <- Vector.freeze locationBuff
+  timestamps <- Vector.freeze timestampBuff
+  runEffect $ encodePut (putVecW32 locations >> putVecW32 timestamps) >-> consumer
+  --let anvilHeaderProducer = encodePut $ putAnvilHeader header
+  --runEffect $ anvilHeaderProducer >-> consumer
+  pure ()
 
 readRegion :: Handle -> IO Region
 readRegion h = do
@@ -339,5 +343,8 @@ readRegion h = do
     let chunkZ = i `div` 32
     modifyIORef chunkMap $ Map.insert (chunkX, chunkZ) (chunk, 0)
   chunkMap' <- readIORef chunkMap
-  return $ Map.map (\(chunkData, _) -> case decompressChunkData chunkData of Right nbt -> nbt) chunkMap'
+  let chunkMap = flip Map.map chunkMap' $ \(chunkData, _) ->
+                  case decompressChunkData chunkData of
+                    Right nbt -> Chunk { chunkNbt = nbt, chunkTimestamp = 0 }
+  return Region { regionChunkMap = chunkMap }
 

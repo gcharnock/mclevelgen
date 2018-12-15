@@ -107,9 +107,13 @@ lnbtContLongArray = prism' put get
     get (LongArrayTag i) = Just i
     get _                = Nothing
 
-compoundName :: T.Text -> (forall f. Applicative f => (NbtContents -> f NbtContents) -> [NBT] -> f [NBT])
-compoundName name f nbtList =
+lnbtContCompoundName :: T.Text -> (forall f. Applicative f => (NbtContents -> f NbtContents) -> [NBT] -> f [NBT])
+lnbtContCompoundName name f nbtList =
       for nbtList $ \(NBT name' nbtContent) ->
         if name == name'
             then NBT <$> pure name' <*> f nbtContent
             else pure $ NBT name' nbtContent
+
+
+compoundName :: T.Text -> (forall f. Applicative f => (NbtContents -> f NbtContents) -> NbtContents -> f NbtContents)
+compoundName name = lnbtContCompound . lnbtContCompoundName name

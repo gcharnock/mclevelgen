@@ -20,6 +20,7 @@ executable levelgen
   other-modules:       Anvil
                        Utils
                        Data.NBT.Lens
+                       Data.Region
   -- other-extensions:
   build-depends:       array,
                        base,
