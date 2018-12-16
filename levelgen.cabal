@@ -19,6 +19,7 @@ executable levelgen
   main-is:             Main.hs
   other-modules:       Anvil
                        Utils
+                       Numeric.Noise
                        Data.NBT.Lens
                        Data.Region
   -- other-extensions:

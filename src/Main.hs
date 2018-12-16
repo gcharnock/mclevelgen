@@ -58,13 +58,10 @@ changeSection nbtContents = do
     forM_ blockStates $ \blockState -> do
         T.putStrLn $ "blockStatesLength = " <> (showT $ UArray.bounds blockState)
         T.putStrLn $ "first few  entires = " <> (foldl (\a b -> a <> ", " <> b) "" $ map (showT . (blockState UArray.!)) [0, 1, 2, 3, 4])
-    forOf (compoundName "Y") nbtContents f
-    let palette = fmap (head . (^.. compoundName "Name" . lnbtContString)) $ head $ nbtContents' ^.. compoundName "Palette" . lnbtContList
-    print palette
+    --forOf (compoundName "Y" . lnbtContInt8) nbtContents print
+    --let palette = fmap (head . (^.. compoundName "Name" . lnbtContString)) $ head $ nbtContents' ^.. compoundName "Palette" . lnbtContList
+    --print palette
     return nbtContents'
-  where
-    f (ByteTag y) = print y >> (return $ ByteTag y)
-    f tag         = return tag
 
 changeSections :: NbtContents -> IO NbtContents
 changeSections nbtContents =
@@ -77,14 +74,20 @@ changeChunk' Chunk { chunkNbt = nbt } = do
     return Chunk { chunkNbt = newNbt, chunkTimestamp = now }
   where
     withLevel :: NbtContents -> IO NbtContents
-    withLevel contents = forOf (compoundName "Sections") contents f
-    f :: NbtContents -> IO NbtContents
-    f = changeSections
+    withLevel contents = do
+        new <- forOf (compoundName "Sections") contents changeSections
+        forOf (compoundName "xPos" . lnbtContInt32) contents $ \xPos -> do
+            T.putStrLn $ "xPos =" <> showT xPos
+            return xPos
+        forOf (compoundName "zPos" . lnbtContInt32) contents $ \zPos -> do
+            T.putStrLn $ "zPos =" <> showT zPos
+            return zPos
+        return new
 
 main :: IO ()
 main = do
-    region <- withFile "example/region/r.-1.-1.mca.old" ReadMode
+    region <- withFile "r.0.0.mca" ReadMode
         $ \handle -> readRegion handle
-    --newChunkMap <- mapM changeChunk' (regionChunkMap region)
-    withFile "example/region/r.-1.-1.mca" WriteMode
-        $ \handle -> writeRegion handle region -- Region { regionChunkMap = newChunkMap }
+    newChunkMap <- mapM changeChunk' (regionChunkMap region)
+    withFile "example/region/r.0.0.mca" WriteMode
+        $ \handle -> writeRegion handle Region { regionChunkMap = newChunkMap }

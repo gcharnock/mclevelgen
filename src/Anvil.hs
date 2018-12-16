@@ -61,6 +61,7 @@ import qualified Pipes
 import           Pipes                          ( Pipe
                                                 , runEffect
                                                 , (>->)
+                                                , (<-<)
                                                 , await
                                                 , each
                                                 , yield
@@ -85,9 +86,9 @@ data CompressionType
 --
 -- Compressed chunk data
 data ZippedChunkData = ZippedChunkData
-  { chunkDataLength      :: Word32 -- ^ length of chunkData + 1
-  , chunkDataCompression :: CompressionType -- ^ compression type
-  , chunkData            :: ByteString -- ^ compressed data (length - 1)
+  { chunkDataLength      :: !Word32 -- ^ length of chunkData + 1
+  , chunkDataCompression :: !CompressionType -- ^ compression type
+  , chunkData            :: !ByteString -- ^ compressed data (length - 1)
   }
   deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
 
@@ -98,8 +99,8 @@ type Word24 = Word32
 --
 -- ChunkLocation 0 0 means chunk is not present in the file
 data ChunkLocation = ChunkLocation
-  { chunkOffset :: Word24 -- ^ number of 4KiB sectors from start of file
-  , chunkLength :: Word8 -- ^ length of chunk -- units are 4KiB sectors, rounded up
+  { chunkOffset :: !Word24 -- ^ number of 4KiB sectors from start of file
+  , chunkLength :: !Word8 -- ^ length of chunk -- units are 4KiB sectors, rounded up
   }
   deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
 
@@ -108,10 +109,10 @@ emptyChunkLocation :: ChunkLocation
 emptyChunkLocation = ChunkLocation 0 0
 
 putChunkLocation :: ChunkLocation -> Put
-putChunkLocation (ChunkLocation offset len) = do
-  putWord8 (fromIntegral ((offset `shiftR` 16) .&. 0xFF))
-  putWord8 (fromIntegral ((offset `shiftR` 8) .&. 0xFF))
-  putWord8 (fromIntegral (offset .&. 0xFF))
+putChunkLocation ChunkLocation { chunkOffset = offset, chunkLength = len } = do
+  putWord8 $ fromIntegral $ (offset `shiftR` 16) .&. 0xFF
+  putWord8 $ fromIntegral $ (offset `shiftR` 8) .&. 0xFF
+  putWord8 $ fromIntegral $ offset .&. 0xFF
   putWord8 len
 
 encodeChunkLocation :: Word32 -> Word32 -> Word32
@@ -166,25 +167,11 @@ getTimestamp = do
   l <- getWord32be
   pure $ (realToFrac l)
 
-putAnvilHeader :: AnvilHeader -> Put
-putAnvilHeader (AnvilHeader locations timestamps)
-  | (Vector.length locations /= 1024) || (Vector.length timestamps /= 1024)
-  = error
-    "putAnvilHeader: locations and timestamps fields must be exactly 1024 entries long."
-  | otherwise
-  = do
-    mapM_ putChunkLocation (Vector.toList locations)
-    mapM_ putTimestamp     (Vector.toList timestamps)
-
 getAnvilHeader :: Get AnvilHeader
 getAnvilHeader = do
   locations  <- replicateM 1024 getChunkLocation
   timestamps <- replicateM 1024 getTimestamp
   pure $ AnvilHeader (Vector.fromList locations) (Vector.fromList timestamps)
-
-instance Serialize AnvilHeader where
-  put = putAnvilHeader
-  get = getAnvilHeader
 
 emptyAnvilHeader :: AnvilHeader
 emptyAnvilHeader = AnvilHeader
@@ -296,35 +283,43 @@ writeRegion :: Handle -> Region -> IO ()
 writeRegion h Region { regionChunkMap } = do
   let chunks = Map.toAscList regionChunkMap
   locationBuff <- liftIO $ MVector.new 1024
-  liftIO $ MVector.set locationBuff 0
+  liftIO $ MVector.set locationBuff emptyChunkLocation
   timestampBuff <- liftIO $ MVector.new 1024
   liftIO $ MVector.set timestampBuff 0
-  let consumer = toHandle h
-  --let header = mkAnvilHeader chunks
+
+
   let byteProducer :: Pipes.Producer B.ByteString IO ()
       byteProducer = Pipes.for (each chunks) $ \(coords, chunk) -> do
         let zippedChunkData = compressChunkData chunk
         let dataLen = chunkDataLength zippedChunkData
         offset <- liftIO $ hTell h
+        unless (offset `mod` 4096 == 0) $ error $ "offset should be a multiple of 4096 but was " <> show offset
         writeChunkData zippedChunkData
         let offsetSectors = offset `div` 4096
         let lengthSector = if dataLen `mod` 4096 == 0 then dataLen `div` 4096 else dataLen `div` 4096 + 1
         let headerLoc = chunkCoordsToHeaderLoc coords
-        let encodedLoc = encodeChunkLocation (fromIntegral offset) lengthSector
+        let chunkLoc = ChunkLocation { chunkOffset = fromIntegral offsetSectors
+                                     , chunkLength = fromIntegral lengthSector }
         liftIO $ putStrLn $ "Wrote Chunk..." <> show coords <> " " <> (show dataLen) <> "b" <> 
                  " headerLoc " <> (show headerLoc) <>
                  " offset=" <> show offsetSectors <>
                  " len=" <> show lengthSector <>
-                 " encoded=" <> showHex encodedLoc ""
-        liftIO $ MVector.write locationBuff headerLoc encodedLoc
+                 " encoded=" <> show chunkLoc
+        liftIO $ MVector.write locationBuff headerLoc chunkLoc 
 
-  hSeek h AbsoluteSeek 8196
-  runEffect $ consumer Pipes.<-< byteProducer
+  hSeek h AbsoluteSeek 8192
+  runEffect $ toHandle h <-< byteProducer
 
   hSeek h AbsoluteSeek 0
   locations <- Vector.freeze locationBuff
+  runEffect $ toHandle h <-< (Pipes.for (each locations) $ \loc -> (encodePut $ putChunkLocation loc))
+  
+  pos <- liftIO $ hTell h
+  unless (pos == 4096) $ error $ "expected pos=4096 but was " <> show pos
+  
+  -- write timestamps
   timestamps <- Vector.freeze timestampBuff
-  runEffect $ encodePut (putVecW32 locations >> putVecW32 timestamps) >-> consumer
+  runEffect $ encodePut (putVecW32 timestamps) >-> toHandle h
   --let anvilHeaderProducer = encodePut $ putAnvilHeader header
   --runEffect $ anvilHeaderProducer >-> consumer
   pure ()

@@ -15,12 +15,14 @@ lNbtLabel = lens get set
   where
     get (NBT label _) = label
     set (NBT _ contents) label = NBT label contents
+{-# INLINE lNbtLabel #-}
 
 lnbtContents :: Lens' NBT NbtContents
 lnbtContents = lens get set
   where
     get (NBT _ contents) = contents
     set (NBT label _) = NBT label
+{-# INLINE lnbtContents #-}
 
 lnbtContInt8 :: Prism' NbtContents Int8
 lnbtContInt8 = prism' put get
@@ -28,6 +30,7 @@ lnbtContInt8 = prism' put get
     put = ByteTag
     get (ByteTag i) = Just i
     get _           = Nothing
+{-# INLINE lnbtContInt8 #-}
 
 lnbtContInt16 :: Prism' NbtContents Int16
 lnbtContInt16 = prism' put get
@@ -35,6 +38,7 @@ lnbtContInt16 = prism' put get
     put = ShortTag
     get (ShortTag i) = Just i
     get _            = Nothing
+{-# INLINE lnbtContInt16 #-}
 
 lnbtContInt32 :: Prism' NbtContents Int32
 lnbtContInt32 = prism' put get
@@ -42,6 +46,7 @@ lnbtContInt32 = prism' put get
     put = IntTag
     get (IntTag i) = Just i
     get _          = Nothing
+{-# INLINE lnbtContInt32 #-}
 
 lnbtContInt64 :: Prism' NbtContents Int64
 lnbtContInt64 = prism' put get
@@ -49,7 +54,7 @@ lnbtContInt64 = prism' put get
     put = LongTag
     get (LongTag i) = Just i
     get _           = Nothing
-
+{-# INLINE lnbtContInt64 #-}
 
 lnbtContFloat :: Prism' NbtContents Float
 lnbtContFloat = prism' put get
@@ -113,7 +118,8 @@ lnbtContCompoundName name f nbtList =
         if name == name'
             then NBT <$> pure name' <*> f nbtContent
             else pure $ NBT name' nbtContent
-
+{-# INLINE lnbtContCompoundName #-}
 
 compoundName :: T.Text -> (forall f. Applicative f => (NbtContents -> f NbtContents) -> NbtContents -> f NbtContents)
 compoundName name = lnbtContCompound . lnbtContCompoundName name
+{-# INLINE compoundName #-}
