@@ -18,7 +18,7 @@ import qualified Data.Text.IO                  as T
 import           System.IO
 import qualified Data.Array.Unboxed as UArray
 import qualified Data.Time.Clock.POSIX as POSIX
-
+import Data.IORef 
 import           Anvil
 import           Data.Region
 
@@ -68,10 +68,11 @@ changeSections nbtContents =
     forOf (lnbtContList . each) nbtContents changeSection
 
 changeChunk' :: Chunk -> IO Chunk
-changeChunk' Chunk { chunkNbt = nbt } = do
-    newNbt <- forOf (lnbtContents . compoundName "Level") nbt withLevel
+changeChunk' Chunk { chunkNbt = nbtRef, chunkBlocks } = do
+    nbt <- readIORef nbtRef
+    newNbt <- forOf (compoundName "Level") nbt withLevel
     now <- POSIX.getPOSIXTime
-    return Chunk { chunkNbt = newNbt, chunkTimestamp = now }
+    return Chunk { chunkNbt = nbtRef, chunkTimestamp = now, chunkBlocks }
   where
     withLevel :: NbtContents -> IO NbtContents
     withLevel contents = do
@@ -88,6 +89,6 @@ main :: IO ()
 main = do
     region <- withFile "r.0.0.mca" ReadMode
         $ \handle -> readRegion handle
-    newChunkMap <- mapM changeChunk' (regionChunkMap region)
+    --newChunkMap <- mapM changeChunk' (regionChunkMap region)
     withFile "example/region/r.0.0.mca" WriteMode
-        $ \handle -> writeRegion handle Region { regionChunkMap = newChunkMap }
+        $ \handle -> writeRegion handle region --Region { regionChunkMap = newChunkMap }

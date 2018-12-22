@@ -1,6 +1,7 @@
-{ mkDerivation, array, base, bytestring, cereal, containers, lens
-, mtl, nbt, pipes, pipes-bytestring, pipes-cereal, pipes-parse
-, pipes-zlib, stdenv, text, text-show, time, vector, zlib
+{ mkDerivation, array, base, bytestring, cereal, containers
+, hashable, keys, lens, mtl, nbt, pipes, pipes-bytestring
+, pipes-cereal, pipes-parse, pipes-zlib, repa, stdenv, text
+, text-show, time, vector, zlib
 }:
 mkDerivation {
   pname = "levelgen";
@@ -9,9 +10,9 @@ mkDerivation {
   isLibrary = false;
   isExecutable = true;
   executableHaskellDepends = [
-    array base bytestring cereal containers lens mtl nbt pipes
-    pipes-bytestring pipes-cereal pipes-parse pipes-zlib text text-show
-    time vector zlib
+    array base bytestring cereal containers hashable keys lens mtl nbt
+    pipes pipes-bytestring pipes-cereal pipes-parse pipes-zlib repa
+    text text-show time vector zlib
   ];
   license = stdenv.lib.licenses.bsd3;
 }

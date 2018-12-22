@@ -29,7 +29,7 @@ import           Data.Data                      ( Data
 import           Data.List                      ( mapAccumL )
 import           Data.Map                       ( Map )
 import qualified Data.Map                      as Map
-import           Data.NBT                       ( NBT )
+import           Data.NBT
 import           Data.Serialize                 ( Serialize(..)
                                                 , Get
                                                 , Put
@@ -179,32 +179,6 @@ emptyAnvilHeader = AnvilHeader
   , timestamps = Vector.replicate 1024 0
   }
 
--- | make an 'AnvilHeader'
---
--- assumes the chunks will be written in the same order as they appear in the list
--- mkAnvilHeader :: Region -> AnvilHeader
--- mkAnvilHeader Region { regionChunkMap } =
---   let timestamps' = map (\(i, (_, t)) -> (chunkIndex i, t)) regionChunkMap
---       locations'  = snd $ mapAccumL mkLocation 0x2 chunks -- ^ first chunk is at sector 0x2, after the AnvilHeader
---   in  AnvilHeader
---         { locations  = (locations emptyAnvilHeader) Vector.// locations'
---         , timestamps = (timestamps emptyAnvilHeader) Vector.// timestamps'
---         }
---  where
---   mkLocation
---     :: Word24 -> ((ChunkX, ChunkZ), (ZippedChunkData, POSIXTime)) -> (Word24, (Int, ChunkLocation))
---   mkLocation offset (chunkPos, (chunkData, _)) =
---     let paddedSectorLength =
---           ((chunkDataLength chunkData) + 4 + 4095) `div` 4096
---         offset' = offset + paddedSectorLength
---     in  ( offset'
---         , ( chunkIndex chunkPos
---           , ChunkLocation offset (fromIntegral paddedSectorLength)
---           )
---         )
--- 
-
-
 putChunkData :: ZippedChunkData -> Put
 putChunkData cd = do
   putWord32be (chunkDataLength cd)
@@ -264,10 +238,12 @@ decompressChunkData cd
     (chunkDataCompression cd)
 
 -- | NBT needs to be a Chunk
-compressChunkData :: Chunk -> ZippedChunkData
-compressChunkData Chunk {chunkNbt} =
-  let d = compress (encodeLazy chunkNbt)
-  in  ZippedChunkData
+compressChunkData :: Chunk -> IO ZippedChunkData
+compressChunkData Chunk {chunkNbt, chunkBlocks} = do
+  blocksNBT <- chunkBlocksToNbt chunkBlocks
+  chunkNbt' <- readIORef chunkNbt
+  let d = compress $ encodeLazy $ NBT "" chunkNbt'
+  return ZippedChunkData
         { chunkDataLength      = 1 + fromIntegral (LB.length d)
         , chunkDataCompression = Zlib
         , chunkData            = d
@@ -290,7 +266,7 @@ writeRegion h Region { regionChunkMap } = do
 
   let byteProducer :: Pipes.Producer B.ByteString IO ()
       byteProducer = Pipes.for (each chunks) $ \(coords, chunk) -> do
-        let zippedChunkData = compressChunkData chunk
+        zippedChunkData <- liftIO $ compressChunkData chunk
         let dataLen = chunkDataLength zippedChunkData
         offset <- liftIO $ hTell h
         unless (offset `mod` 4096 == 0) $ error $ "offset should be a multiple of 4096 but was " <> show offset
@@ -338,8 +314,8 @@ readRegion h = do
     let chunkZ = i `div` 32
     modifyIORef chunkMap $ Map.insert (chunkX, chunkZ) (chunk, 0)
   chunkMap' <- readIORef chunkMap
-  let chunkMap = flip Map.map chunkMap' $ \(chunkData, _) ->
+  chunkMap <- flip mapM chunkMap' $ \(chunkData, _) ->
                   case decompressChunkData chunkData of
-                    Right nbt -> Chunk { chunkNbt = nbt, chunkTimestamp = 0 }
+                    Right (NBT "" nbtCont) -> newChunk 0 nbtCont
   return Region { regionChunkMap = chunkMap }
 

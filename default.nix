@@ -11,8 +11,11 @@ let
   };
   hspkgs = defaultHspkgs.override {
       overrides = self: super: {
+          mkDerivation = args: super.mkDerivation (args // {
+            enableLibraryProfiling = true;
+          });
           pipes-cereal = overrideSrc super.pipes-cereal {src = pipes-cereal-github;};
       };
   };
 in
-dontCheck (hspkgs.callPackage ./levelgen.nix {})
+dontCheck (hspkgs.callPackage ./levelgen.nix { })
