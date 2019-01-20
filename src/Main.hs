@@ -21,6 +21,9 @@ import qualified Data.Time.Clock.POSIX as POSIX
 import Data.IORef 
 import           Anvil
 import           Data.Region
+import Data.Chunk
+import Data.BlockPalette
+import qualified Data.Vector.Unboxed.Mutable as MVector
 
 showT :: Show a => a -> T.Text
 showT = T.pack . show
@@ -85,10 +88,23 @@ changeChunk' Chunk { chunkNbt = nbtRef, chunkBlocks } = do
             return zPos
         return new
 
+mutateMap :: BlockPalette -> Region -> IO ()
+mutateMap bp Region {regionChunkMap} = do
+    putStrLn "Running mutateMap"
+    planksId <- getBlockId bp "minecraft:planks"
+    sandstoneId <- getBlockId bp "minecraft:sandstone"
+    forM_ regionChunkMap $ \Chunk {chunkBlocks} -> do
+         let len = MVector.length chunkBlocks 
+         forM_ [0..len -1] $ \i -> do
+            id <- MVector.read chunkBlocks i
+            when (id == sandstoneId) $ MVector.write chunkBlocks i planksId
+
 main :: IO ()
 main = do
+    bp <- newBlockPalette
     region <- withFile "r.0.0.mca" ReadMode
-        $ \handle -> readRegion handle
+        $ \handle -> readRegion bp handle
     --newChunkMap <- mapM changeChunk' (regionChunkMap region)
+    -- mutateMap bp region
     withFile "example/region/r.0.0.mca" WriteMode
-        $ \handle -> writeRegion handle region --Region { regionChunkMap = newChunkMap }
+       $ \handle -> writeRegion bp handle region --Region { regionChunkMap = newChunkMap }
