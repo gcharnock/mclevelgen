@@ -1,2 +1,2 @@
 { }:
-(import ./default.nix {}).env
+(import ./default.nix).env

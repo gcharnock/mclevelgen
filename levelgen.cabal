@@ -19,6 +19,7 @@ executable levelgen
   main-is:             Main.hs
   ghc-options:         -rtsopts -O2 -fprof-auto
   other-modules:       Anvil
+                       AppMonad
                        Utils
                        Numeric.Noise
                        Data.NBT.Lens
@@ -32,6 +33,7 @@ executable levelgen
                        OverloadedStrings
                        BangPatterns
                        LambdaCase
+                       QuasiQuotes
 
   build-depends:       array,
                        base,
@@ -45,6 +47,7 @@ executable levelgen
                        pipes,
                        lens,
                        mtl,
+                       transformers,
                        nbt,
                        text,
                        text-show,
@@ -55,7 +58,10 @@ executable levelgen
                        repa,
                        keys,
                        hashable,
-                       hashtables
+                       hashtables,
+                       contextual-logger,
+                       unliftio,
+                       unliftio-core
 
   hs-source-dirs:      src
   default-language:    Haskell2010

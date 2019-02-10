@@ -7,7 +7,6 @@
 module Anvil where
 
 import Control.Monad.IO.Class
-import           Data.IORef
 import           Control.Monad
 import           Control.Monad.State.Strict     ( execStateT
                                                 , modify'
@@ -67,8 +66,6 @@ import           Pipes                          ( Pipe
                                                 , yield
                                                 )
 import           System.IO                      ( Handle
-                                                , hSeek
-                                                , hTell
                                                 , SeekMode(AbsoluteSeek)
                                                 )
 import Data.BlockPalette
@@ -76,7 +73,12 @@ import Numeric
 import Data.Region
 import Data.Chunk
 import Utils
+import Logging.Contextual.BasicScheme
+import Control.Monad.Trans.Class
+import UnliftIO.IORef
+import UnliftIO.IO
 
+import AppMonad
 
 data CompressionType
   = GZip -- ^ unused in practice
@@ -239,11 +241,11 @@ decompressChunkData cd
     (chunkDataCompression cd)
 
 -- | NBT needs to be a Chunk
-compressChunkData :: BlockPalette -> Chunk -> IO ZippedChunkData
+compressChunkData :: BlockPalette -> Chunk -> App ZippedChunkData
 compressChunkData bp chunk@Chunk {chunkNbt} = do
   updateChunkBlockNbt bp chunk 
-  chunkNbt' <- readIORef chunkNbt
-  putStrLn "Compressing chunk"
+  chunkNbt' <- liftIO $ readIORef chunkNbt
+  [logTrace|Compressing chunk|]
   let d = compress $ encodeLazy $ NBT "" chunkNbt'
   return ZippedChunkData
         { chunkDataLength      = 1 + fromIntegral (LB.length d)
@@ -257,7 +259,7 @@ chunkCoordsToHeaderLoc (chunkX, chunkZ) = chunkX + chunkZ * 32
 putVecW32 :: Vector Word32 -> Put
 putVecW32 = Vector.mapM_ putWord32be
 
-writeRegion :: BlockPalette -> Handle -> Region -> IO ()
+writeRegion :: BlockPalette -> Handle -> Region -> App ()
 writeRegion bp h Region { regionChunkMap } = do
   let chunks = Map.toAscList regionChunkMap
   locationBuff <- liftIO $ MVector.new 1024
@@ -266,9 +268,9 @@ writeRegion bp h Region { regionChunkMap } = do
   liftIO $ MVector.set timestampBuff 0
 
 
-  let byteProducer :: Pipes.Producer B.ByteString IO ()
+  let byteProducer :: Pipes.Producer B.ByteString App ()
       byteProducer = Pipes.for (each chunks) $ \(coords, chunk) -> do
-        zippedChunkData <- liftIO $ compressChunkData bp chunk
+        zippedChunkData <- lift $ compressChunkData bp chunk
         let dataLen = chunkDataLength zippedChunkData
         offset <- liftIO $ hTell h
         unless (offset `mod` 4096 == 0) $ error $ "offset should be a multiple of 4096 but was " <> show offset
@@ -278,17 +280,14 @@ writeRegion bp h Region { regionChunkMap } = do
         let headerLoc = chunkCoordsToHeaderLoc coords
         let chunkLoc = ChunkLocation { chunkOffset = fromIntegral offsetSectors
                                      , chunkLength = fromIntegral lengthSector }
-        liftIO $ putStrLn $ "Wrote Chunk..." <> show coords <> " " <> show dataLen <> "b" <> 
-                 " headerLoc " <> (show headerLoc) <>
-                 " offset=" <> show offsetSectors <>
-                 " len=" <> show lengthSector <>
-                 " encoded=" <> show chunkLoc
+        [logInfo|Wrote Chunk... {coords} {dataLen}b {headerLoc} {headerLoc} offset={offsetSectors}
+                 len={lengthSector} encoded={chunkLoc}|]
         liftIO $ MVector.write locationBuff headerLoc chunkLoc 
 
-  hSeek h AbsoluteSeek 8192
+  liftIO $ hSeek h AbsoluteSeek 8192
   runEffect $ toHandle h <-< byteProducer
 
-  hSeek h AbsoluteSeek 0
+  liftIO $ hSeek h AbsoluteSeek 0
   locations <- Vector.freeze locationBuff
   runEffect $ toHandle h <-< (Pipes.for (each locations) $ \loc -> (encodePut $ putChunkLocation loc))
   
@@ -302,20 +301,29 @@ writeRegion bp h Region { regionChunkMap } = do
   --runEffect $ anvilHeaderProducer >-> consumer
   pure ()
 
-readRegion :: BlockPalette -> Handle -> IO Region
+readRegion :: BlockPalette -> Handle -> App Region
 readRegion bp h = do
-  chunkMap <- newIORef Map.empty
+  [logInfo|starting readRegion|]
+
+  [logTrace|createing empty chunk map|]
+  chunkMapRef <- newIORef Map.empty
   hSeek h AbsoluteSeek 0
+
   let producer = fromHandle h
-  (Right header, leftover) <- runEffect
-    $ runStateT (decodeGet getAnvilHeader) producer
+  (Right header, leftover) <- runEffect $ runStateT (decodeGet getAnvilHeader) producer
   let locs = locations header
+
+  [logInfo|iterating chunk locations|]
   iforM_ locs $ \i ChunkLocation {chunkOffset, chunkLength} -> do
+    [logTrace|loading chunk described at header location {i}|]
     (Right chunk, _) <- runEffect $ runStateT (decodeGet getChunkData) leftover
     let chunkX = i `mod` 32
     let chunkZ = i `div` 32
-    modifyIORef chunkMap $ Map.insert (chunkX, chunkZ) (chunk, 0)
-  chunkMap' <- readIORef chunkMap
+    [logTrace|inserting chunk ({chunkX}, {chunkZ}) into chunk map|]
+    modifyIORef chunkMapRef $ Map.insert (chunkX, chunkZ) (chunk, 0)
+
+  chunkMap' <- readIORef chunkMapRef
+  [logTrace|iterating chunk map and decoding to NBT|]
   chunkMap <- flip mapM chunkMap' $ \(chunkData, _) ->
                   case decompressChunkData chunkData of
                     Right (NBT "" nbtCont) -> newChunk bp 0 nbtCont
