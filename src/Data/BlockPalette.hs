@@ -1,5 +1,5 @@
 
-module Data.BlockPalette (BlockPalette, newBlockPalette, getMCName, getBlockId, prettyPrintBlockPalette) where
+module Data.BlockPalette (BlockPalette, newBlockPalette, getMCName, getBlockId, prettyPrintBlockPalette, doPaletteSwap) where
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -44,6 +44,18 @@ getMCName BlockPalette { toMCName } blockId = do
   case result of
     Nothing -> error $ "failed to lookup block id " <> show blockId
     Just mcName -> return mcName
+
+doPaletteSwap :: BlockPalette -> T.Text -> T.Text -> App ()
+doPaletteSwap BlockPalette {toMCName, fromMCName} oldMCBlockId newMCBlockId = do
+  liftIO $ do
+    blockId <- HashTable.lookup fromMCName oldMCBlockId
+    case blockId of
+      Nothing -> error "no such block id"
+      Just blockId -> do
+        HashTable.insert toMCName blockId newMCBlockId
+        HashTable.delete fromMCName oldMCBlockId
+        HashTable.insert fromMCName newMCBlockId blockId
+
 
 prettyPrintBlockPalette :: BlockPalette -> IO ()
 prettyPrintBlockPalette BlockPalette { fromMCName } =

@@ -130,6 +130,9 @@ app = do
         $ \handle -> readRegion bp handle
     --newChunkMap <- mapM changeChunk' (regionChunkMap region)
     -- mutateMap bp region
+    liftIO $ prettyPrintBlockPalette bp
+    doPaletteSwap bp "minecraft:sandstone" "minecraft:planks"
+    liftIO $ prettyPrintBlockPalette bp
     [logInfo|writing to file|]
     withFile "example/region/r.0.0.mca" WriteMode
         $ \handle -> writeRegion bp handle region --Region { regionChunkMap = newChunkMap }
