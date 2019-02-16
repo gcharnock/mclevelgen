@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 module Anvil where
 
 import Control.Monad.IO.Class
@@ -73,6 +74,8 @@ import Numeric
 import Data.Region
 import Data.Chunk
 import Utils
+import Control.Monad.Reader.Class
+import Logging.Contextual
 import Logging.Contextual.BasicScheme
 import Control.Monad.Trans.Class
 import UnliftIO.IORef
@@ -228,10 +231,14 @@ readChunkData h chunkLocation
       (Left  err) -> error err
       (Right cd ) -> pure (Just cd)
 
-writeChunkData :: (MonadIO m) => ZippedChunkData -> Pipes.Producer B.ByteString m ()
-writeChunkData zippedChunkData = do
+writeChunkData :: (MonadIO m, HasLog env, MonadReader env m) => ZippedChunkData -> Pipes.Producer B.ByteString m ()
+writeChunkData zippedChunkData@ZippedChunkData {chunkDataLength} = do
+  [logInfo|writeChunkData - writing zipped chunk data to producer. length = {chunkDataLength}}|]
   encodePut (putChunkData zippedChunkData)
-  let padding = 4096 - ((chunkDataLength zippedChunkData + 4) `mod` 4096)
+  
+  let padding = 4096 - ((chunkDataLength + 4) `mod` 4096)
+
+  [logTrace|padding = {padding}|]
   when (padding > 0) (yield (B.replicate (fromIntegral padding) 0))
 
 decompressChunkData :: ZippedChunkData -> Either String NBT
@@ -243,10 +250,21 @@ decompressChunkData cd
 -- | NBT needs to be a Chunk
 compressChunkData :: BlockPalette -> Chunk -> App ZippedChunkData
 compressChunkData bp chunk@Chunk {chunkNbt} = do
+  [logInfo|running compressChunkData|]
+
   updateChunkBlockNbt bp chunk 
+  [logTrace|block nbt for chunk as been updated|]
+
   chunkNbt' <- liftIO $ readIORef chunkNbt
-  [logTrace|Compressing chunk|]
-  let d = compress $ encodeLazy $ NBT "" chunkNbt'
+
+  [logTrace|Encoding chunk nbt into byte string|]
+  let uncompressed = encodeLazy $ NBT "" chunkNbt'
+
+  [logTrace|Compressing chunk. Initial length was {LB.length uncompressed}|]
+  let d = compress uncompressed
+
+  [logTrace|Compressed chunk. Final length was {LB.length d}|]
+
   return ZippedChunkData
         { chunkDataLength      = 1 + fromIntegral (LB.length d)
         , chunkDataCompression = Zlib
@@ -261,38 +279,68 @@ putVecW32 = Vector.mapM_ putWord32be
 
 writeRegion :: BlockPalette -> Handle -> Region -> App ()
 writeRegion bp h Region { regionChunkMap } = do
+  [logInfo|writeRegion: writing a region to disk|]
   let chunks = Map.toAscList regionChunkMap
+
   locationBuff <- liftIO $ MVector.new 1024
   liftIO $ MVector.set locationBuff emptyChunkLocation
   timestampBuff <- liftIO $ MVector.new 1024
   liftIO $ MVector.set timestampBuff 0
 
+  [logTrace|allocated buffers for writing the region header|]
 
   let byteProducer :: Pipes.Producer B.ByteString App ()
-      byteProducer = Pipes.for (each chunks) $ \(coords, chunk) -> do
-        zippedChunkData <- lift $ compressChunkData bp chunk
-        let dataLen = chunkDataLength zippedChunkData
-        offset <- liftIO $ hTell h
-        unless (offset `mod` 4096 == 0) $ error $ "offset should be a multiple of 4096 but was " <> show offset
-        writeChunkData zippedChunkData
-        let offsetSectors = offset `div` 4096
-        let lengthSector = if dataLen `mod` 4096 == 0 then dataLen `div` 4096 else dataLen `div` 4096 + 1
-        let headerLoc = chunkCoordsToHeaderLoc coords
-        let chunkLoc = ChunkLocation { chunkOffset = fromIntegral offsetSectors
-                                     , chunkLength = fromIntegral lengthSector }
-        [logInfo|Wrote Chunk... {coords} {dataLen}b {headerLoc} {headerLoc} offset={offsetSectors}
-                 len={lengthSector} encoded={chunkLoc}|]
-        liftIO $ MVector.write locationBuff headerLoc chunkLoc 
+      byteProducer = do
+        [logInfo|running producer for chunks|]
 
+        Pipes.for (each chunks) $ \(coords, chunk) -> do
+          [logInfo|running producer over chunk with coords {coords}|]
+          
+          zippedChunkData <- lift $ compressChunkData bp chunk
+          let dataLen = chunkDataLength zippedChunkData
+          [logTrace|length of compressed data was {dataLen}|]
+
+          offset <- liftIO $ hTell h
+          let offsetSectors = offset `div` 4096
+
+          [logTrace|offset in the file was {offset} or {offsetSectors} sectors|]
+          unless (offset `mod` 4096 == 0) $ do
+            [logError|offset should be a multiple of 4096 but was {offset}|]
+            error $ "offset should be a multiple of 4096 but was " <> show offset
+
+          writeChunkData zippedChunkData
+          let lengthSector = 
+                if dataLen `mod` 4096 == 0
+                  then dataLen `div` 4096
+                  else dataLen `div` 4096 + 1
+          [logTrace|lengthSector = {lengthSector}|]
+
+          let headerLoc = chunkCoordsToHeaderLoc coords
+          [logTrace|coords {coords} ==> headerLoc = {headerLoc}|]
+
+          let chunkLoc = ChunkLocation { chunkOffset = fromIntegral offsetSectors
+                                       , chunkLength = fromIntegral lengthSector }
+          [logTrace|chunkLoc = {chunkLoc}|]
+
+          [logInfo|Wrote Chunk... {coords} {dataLen}b {headerLoc} {headerLoc} offset={offsetSectors}
+                   len={lengthSector} encoded={chunkLoc}|]
+          liftIO $ MVector.write locationBuff headerLoc chunkLoc 
+
+  [logTrace|hSeak file handle to start of chunks|]
   liftIO $ hSeek h AbsoluteSeek 8192
   runEffect $ toHandle h <-< byteProducer
 
+  [logTrace|hSeak file handle to zero|]
   liftIO $ hSeek h AbsoluteSeek 0
+
+  [logTrace|freezing location buffer|]
   locations <- Vector.freeze locationBuff
   runEffect $ toHandle h <-< (Pipes.for (each locations) $ \loc -> (encodePut $ putChunkLocation loc))
   
   pos <- liftIO $ hTell h
-  unless (pos == 4096) $ error $ "expected pos=4096 but was " <> show pos
+  unless (pos == 4096) $ do
+    [logError|expected pos=4096 but was {pos}|]
+    error $ "expected pos=4096 but was " <> show pos
   
   -- write timestamps
   timestamps <- Vector.freeze timestampBuff

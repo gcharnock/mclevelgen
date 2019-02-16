@@ -130,8 +130,9 @@ app = do
         $ \handle -> readRegion bp handle
     --newChunkMap <- mapM changeChunk' (regionChunkMap region)
     -- mutateMap bp region
-    --withFile "example/region/r.0.0.mca" WriteMode
-    --    $ \handle -> writeRegion bp handle region --Region { regionChunkMap = newChunkMap }
+    [logInfo|writing to file|]
+    withFile "example/region/r.0.0.mca" WriteMode
+        $ \handle -> writeRegion bp handle region --Region { regionChunkMap = newChunkMap }
     return ()
 
 

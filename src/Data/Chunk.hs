@@ -43,6 +43,8 @@ import Data.Key
 import Data.BlockPalette
 import Data.HashTable.IO as HashTable
 import Logging.Contextual.BasicScheme
+import GHC.Stack
+import Utils
 
 import AppMonad
 
@@ -66,10 +68,14 @@ updateChunkBlockNbt :: BlockPalette -> Chunk -> App ()
 updateChunkBlockNbt bp Chunk {chunkBlocks, chunkNbt} = do
   [logTrace|starting updateChunkBlockNbt|]
   nbt <- liftIO $ readIORef chunkNbt
+  [logTrace|nbt for chunk is {nbt}|]
+
   newSections <- chunkBlocksToNbt bp chunkBlocks
+  [logTrace|newSections = {newSections}|]
+
   let nbt' = set (compoundName "Level" . compoundName "Sections") newSections nbt
   liftIO $ writeIORef chunkNbt nbt'
-  [logTrace|finished updateChunkBlockNbt|]
+  [logTrace|finished updateChunkBlockNbt. Final nbt was {nbt'}|]
 
 
 -- Private
@@ -101,21 +107,24 @@ nbtToChunkBlocks bp nbt = do
       MVector.write blocks (toChunkMem x y z) gBlockId
   return blocks
 
-chunkBlocksToNbt :: BlockPalette -> MVector.IOVector Word16 -> App NbtContents
+chunkBlocksToNbt :: HasCallStack => BlockPalette -> MVector.IOVector Word16 -> App NbtContents
 chunkBlocksToNbt bp chunkBlocks = do
   sectionsList <- forM [0, 1, 2, 3, 4] $ \i -> do
        [logTrace|converting section {i} to NBT format|]
        let sectionSlice = MVector.slice (i * 4096) 4096 chunkBlocks
        (blocksLocalEncoding, paletteList) <- encodeSectorPalette bp sectionSlice 
 
-       let palette = listArray (0, fromIntegral $ length paletteList) . 
-                     map (\name -> CompoundTag [NBT "Name" $ StringTag name]) $ paletteList
+       let blockIdCount = length paletteList
+       [logTrace|blockIdCount = {blockIdCount}|]
+
+       let palette = listToArray . map (\name -> CompoundTag [NBT "Name" $ StringTag name]) $ paletteList
        [logTrace|computed palette for section was {palette}|]
     
        blocksLocalPacked <- encode4BitBlockStates blocksLocalEncoding 
        return $ CompoundTag $ [ NBT "BlockStates" $ LongArrayTag blocksLocalPacked
-                              , NBT "Palette" $ ListTag palette]
-  return $ ListTag $ listArray (0, fromIntegral $ length sectionsList) sectionsList 
+                              , NBT "Palette" $ ListTag palette
+                              , NBT "Y" $ ByteTag (fromIntegral i)]
+  return $ ListTag $ listToArray sectionsList 
 
 decode4BitBlockStates :: UArray Int32 Int64 -> [Int]
 decode4BitBlockStates theArray =
@@ -141,7 +150,11 @@ decode4BitBlockStates theArray =
 
 encodeSectorPalette :: BlockPalette -> MVector.IOVector Word16 -> App (MVector.IOVector Int32, [T.Text])
 encodeSectorPalette bp blocks = do
-  [logTrace|Running encodeSectorPalette|]
+  [logTrace|Running encodeSectorPalette
+    -resolve global block ids with the block palette and produce a list of unique minecraft
+     block ids and a buffer of blocks encoded as indexes into that list
+  |]
+
   localBp <- liftIO $ HashTable.new :: App (HashTable T.Text Int32)
   paletteRef <- liftIO $ newIORef []
   nextIdRef <- liftIO $ newIORef 0
@@ -156,6 +169,7 @@ encodeSectorPalette bp blocks = do
       Just localId -> return localId
       Nothing -> do
         nextId <- liftIO $ readIORef nextIdRef
+        [logTrace|new local block found: {mcName}. Assigning it id {nextId}|]
         liftIO $ writeIORef nextIdRef (nextId + 1)
         liftIO $ HashTable.insert localBp mcName nextId
         liftIO $ modifyIORef paletteRef (mcName:)
@@ -163,11 +177,12 @@ encodeSectorPalette bp blocks = do
     liftIO $ MVector.write result i localId
   
   palette <- liftIO $ reverse <$> readIORef paletteRef
-  [logTrace|Finished encodeSectorPalette|]
+  [logTrace|Finished encodeSectorPalette. Final local palette was {palette}|]
   return (result, palette)
 
 encode4BitBlockStates :: MVector.IOVector Int32 -> App (UArray Int32 Int64)
 encode4BitBlockStates theVector = do
+  [logTrace|encoding |]
   let len = MVector.length theVector
   asList <- forM [0,16..len - 1] $ \i -> do
     [logTrace|slice {i} , {i+15} from vector of length {len}|]
@@ -195,4 +210,4 @@ encode4BitBlockStates theVector = do
       get 13 `andIO`
       get 14 `andIO`
       get 15
-  return $ listArray (0, fromIntegral len `div` 16) asList
+  return $ listArray (0, (fromIntegral len `div` 16) - 1) asList
