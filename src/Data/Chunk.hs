@@ -107,6 +107,12 @@ nbtToChunkBlocks bp nbt = do
       MVector.write blocks (toChunkMem x y z) gBlockId
   return blocks
 
+blockLight :: NbtContents
+blockLight = ByteArrayTag $ listToArray $ replicate 2048 0
+
+skylight :: NbtContents
+skylight = ByteArrayTag $ listToArray $ replicate 2048 0
+
 chunkBlocksToNbt :: HasCallStack => BlockPalette -> MVector.IOVector Word16 -> App NbtContents
 chunkBlocksToNbt bp chunkBlocks = do
   sectionsList <- forM [0, 1, 2, 3, 4] $ \i -> do
@@ -123,6 +129,8 @@ chunkBlocksToNbt bp chunkBlocks = do
        blocksLocalPacked <- encode4BitBlockStates blocksLocalEncoding 
        return $ CompoundTag $ [ NBT "BlockStates" $ LongArrayTag blocksLocalPacked
                               , NBT "Palette" $ ListTag palette
+                              , NBT "BlockLight" $ blockLight
+                              , NBT "SkyLight" $ skylight 
                               , NBT "Y" $ ByteTag (fromIntegral i)]
   return $ ListTag $ listToArray sectionsList 
 
@@ -185,8 +193,6 @@ encode4BitBlockStates theVector = do
   [logTrace|encoding |]
   let len = MVector.length theVector
   asList <- forM [0,16..len - 1] $ \i -> do
-    [logTrace|slice {i} , {i+15} from vector of length {len}|]
-
     let thisBit = MVector.slice i 16 theVector
     let andIO a b = (.&.) <$> a <*> b
     let get :: Int -> IO Int64
