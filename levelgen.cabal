@@ -25,6 +25,7 @@ executable levelgen
                        Data.NBT.Lens
                        Data.Region
                        Data.Chunk
+                       Data.ZippedChunk
                        Data.BlockPalette
   
   default-extensions:  NamedFieldPuns

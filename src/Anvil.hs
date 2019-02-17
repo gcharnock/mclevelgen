@@ -9,15 +9,11 @@ module Anvil where
 
 import Control.Monad.IO.Class
 import           Control.Monad
-import           Codec.Compression.Zlib         ( decompress
-                                                , compress
-                                                )
 import           Data.Bits                      ( shiftR
                                                 , shiftL
                                                 , (.&.)
                                                 , (.|.)
                                                 )
-import           Data.ByteString.Lazy           ( ByteString )
 import qualified Data.ByteString               as B
 import qualified Data.ByteString.Lazy          as LB
 import           Data.Data                      ( Data
@@ -28,8 +24,6 @@ import           Data.NBT
 import           Data.Serialize                 ( Serialize(..)
                                                 , Get
                                                 , Put
-                                                , decodeLazy
-                                                , encodeLazy
                                                 , getLazyByteString
                                                 , getWord8
                                                 , getWord32be
@@ -71,23 +65,10 @@ import Logging.Contextual.BasicScheme
 import Control.Monad.Trans.Class
 import UnliftIO.IORef
 import UnliftIO.IO
+import Data.ZippedChunk
+
 
 import AppMonad
-
-data CompressionType
-  = GZip -- ^ unused in practice
-  | Zlib
-  deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
-
--- | ChunkData
---
--- Compressed chunk data
-data ZippedChunkData = ZippedChunkData
-  { chunkDataLength      :: !Word32 -- ^ length of chunkData + 1
-  , chunkDataCompression :: !CompressionType -- ^ compression type
-  , chunkData            :: !ByteString -- ^ compressed data (length - 1)
-  }
-  deriving (Eq, Ord, Read, Show, Data, Typeable, Generic)
 
 
 type Word24 = Word32
@@ -176,16 +157,16 @@ emptyAnvilHeader = AnvilHeader
   , timestamps = Vector.replicate 1024 0
   }
 
-putChunkData :: ZippedChunkData -> Put
-putChunkData cd = do
-  putWord32be (chunkDataLength cd)
-  case chunkDataCompression cd of
+putZippedChunk :: ZippedChunk -> Put
+putZippedChunk cd = do
+  putWord32be (zippedChunkLength cd)
+  case zippedChunkCompression cd of
     GZip -> putWord8 1
     Zlib -> putWord8 2
-  putLazyByteString (chunkData cd)
+  putLazyByteString (zippedChunkBytes cd)
 
-getChunkData :: Get ZippedChunkData
-getChunkData = do
+getZippedChunk :: Get ZippedChunk
+getZippedChunk = do
   len  <- getWord32be
   comp <- do
     w <- getWord8
@@ -195,11 +176,8 @@ getChunkData = do
       _ ->
         error $ "Unknown compression code in getChunkData: " ++ show (len, w)
   bs <- getLazyByteString (fromIntegral (len - 1))
-  pure $ ZippedChunkData len comp bs
+  pure $ ZippedChunk len comp bs
 
-instance Serialize ZippedChunkData where
-  put = putChunkData
-  get = getChunkData
 
 -- | read file header form a Seekable Handle
 readHeader :: Handle -> IO AnvilHeader
@@ -212,55 +190,28 @@ readHeader h = do
 
 
 -- | read 'ChunkData' from a Seekable 'Handle'
-readChunkData :: Handle -> ChunkLocation -> IO (Maybe ZippedChunkData)
+readChunkData :: Handle -> ChunkLocation -> IO (Maybe ZippedChunk)
 readChunkData h chunkLocation
   | chunkLocation == emptyChunkLocation = pure Nothing
   | otherwise = do
     hSeek h AbsoluteSeek (fromIntegral $ ((chunkOffset chunkLocation) * 4096))
-    (r, _) <- runStateT (decodeGet getChunkData) (fromHandle h)
+    (r, _) <- runStateT (decodeGet getZippedChunk) (fromHandle h)
     case r of
       (Left  err) -> error err
       (Right cd ) -> pure (Just cd)
 
-writeChunkData :: (MonadIO m, HasLog env, MonadReader env m) => ZippedChunkData -> Pipes.Producer B.ByteString m ()
-writeChunkData zippedChunkData@ZippedChunkData {chunkDataLength} = do
-  [logInfo|writeChunkData - writing zipped chunk data to producer. length = {chunkDataLength}}|]
-  encodePut (putChunkData zippedChunkData)
+writeChunkData :: (MonadIO m, HasLog env, MonadReader env m)
+               => ZippedChunk -> Pipes.Producer B.ByteString m ()
+writeChunkData zippedChunk@ZippedChunk {zippedChunkLength} = do
+  [logInfo|writeChunkData - writing zipped chunk data to producer. length = {zippedChunkLength}}|]
+  encodePut (putZippedChunk zippedChunk)
   
-  let padding = 4096 - ((chunkDataLength + 4) `mod` 4096)
+  let padding = 4096 - ((zippedChunkLength + 4) `mod` 4096)
 
   [logTrace|padding = {padding}|]
   when (padding > 0) (yield (B.replicate (fromIntegral padding) 0))
 
-decompressChunkData :: ZippedChunkData -> Either String NBT
-decompressChunkData cd
-  | chunkDataCompression cd == Zlib = decodeLazy (decompress (chunkData cd))
-  | otherwise = error $ "decompressChunkData not implemented for " ++ show
-    (chunkDataCompression cd)
 
--- | NBT needs to be a Chunk
-compressChunkData :: Chunk -> App ZippedChunkData
-compressChunkData chunk@Chunk {chunkNbt} = do
-  [logInfo|running compressChunkData|]
-
-  updateChunkBlockNbt chunk 
-  [logTrace|block nbt for chunk as been updated|]
-
-  chunkNbt' <- liftIO $ readIORef chunkNbt
-
-  [logTrace|Encoding chunk nbt into byte string|]
-  let uncompressed = encodeLazy $ NBT "" chunkNbt'
-
-  [logTrace|Compressing chunk. Initial length was {LB.length uncompressed}|]
-  let d = compress uncompressed
-
-  [logTrace|Compressed chunk. Final length was {LB.length d}|]
-
-  return ZippedChunkData
-        { chunkDataLength      = 1 + fromIntegral (LB.length d)
-        , chunkDataCompression = Zlib
-        , chunkData            = d
-        }
 
 chunkCoordsToHeaderLoc :: (ChunkX, ChunkZ) -> Int
 chunkCoordsToHeaderLoc (chunkX, chunkZ) = chunkX + chunkZ * 32
@@ -287,8 +238,8 @@ writeRegion h Region { regionChunkMap } = do
         Pipes.for (each chunks) $ \(coords, chunk) -> do
           [logInfo|running producer over chunk with coords {coords}|]
           
-          zippedChunkData <- lift $ compressChunkData chunk
-          let dataLen = chunkDataLength zippedChunkData
+          zippedChunk <- lift $ compressChunkData chunk
+          let dataLen = zippedChunkLength zippedChunk
           [logTrace|length of compressed data was {dataLen}|]
 
           offset <- liftIO $ hTell h
@@ -299,7 +250,7 @@ writeRegion h Region { regionChunkMap } = do
             [logError|offset should be a multiple of 4096 but was {offset}|]
             error $ "offset should be a multiple of 4096 but was " <> show offset
 
-          writeChunkData zippedChunkData
+          writeChunkData zippedChunk
           let lengthSector = 
                 if dataLen `mod` 4096 == 0
                   then dataLen `div` 4096
@@ -357,7 +308,7 @@ readRegion h = do
     -- TODO: I think we might be reading the same chunk over and over here
     -- as we're not using the chunk location.
     [logTrace|loading chunk described at header location {i}|]
-    (Right chunk, _) <- runEffect $ runStateT (decodeGet getChunkData) leftover
+    (Right chunk, _) <- runEffect $ runStateT (decodeGet getZippedChunk) leftover
     let chunkX = i `mod` 32
     let chunkZ = i `div` 32
     [logTrace|inserting chunk ({chunkX}, {chunkZ}) into chunk map|]
