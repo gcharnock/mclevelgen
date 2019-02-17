@@ -57,7 +57,6 @@ import           System.IO                      ( Handle
                                                 , SeekMode(AbsoluteSeek)
                                                 )
 import Data.Region
-import Data.Chunk
 import Utils
 import Control.Monad.Reader.Class
 import Logging.Contextual
@@ -203,7 +202,7 @@ readChunkData h chunkLocation
 writeChunkData :: (MonadIO m, HasLog env, MonadReader env m)
                => ZippedChunk -> Pipes.Producer B.ByteString m ()
 writeChunkData zippedChunk@ZippedChunk {zippedChunkLength} = do
-  [logInfo|writeChunkData - writing zipped chunk data to producer. length = {zippedChunkLength}}|]
+  [logTrace|writeChunkData - writing zipped chunk data to producer. length = {zippedChunkLength}}|]
   encodePut (putZippedChunk zippedChunk)
   
   let padding = 4096 - ((zippedChunkLength + 4) `mod` 4096)
@@ -233,14 +232,12 @@ writeRegion h Region { regionChunkMap } = do
 
   let byteProducer :: Pipes.Producer B.ByteString App ()
       byteProducer = do
-        [logInfo|running producer for chunks|]
+        [logTrace|running producer for chunks|]
 
-        Pipes.for (each chunks) $ \(coords, chunk) -> do
-          [logInfo|running producer over chunk with coords {coords}|]
-          
-          zippedChunk <- lift $ compressChunkData chunk
+        Pipes.for (each chunks) $ \(coords, zippedChunk) -> do
+          [logTrace|running producer over chunk with coords {coords}|]
+
           let dataLen = zippedChunkLength zippedChunk
-          [logTrace|length of compressed data was {dataLen}|]
 
           offset <- liftIO $ hTell h
           let offsetSectors = offset `div` 4096
@@ -264,7 +261,7 @@ writeRegion h Region { regionChunkMap } = do
                                        , chunkLength = fromIntegral lengthSector }
           [logTrace|chunkLoc = {chunkLoc}|]
 
-          [logInfo|Wrote Chunk... {coords} {dataLen}b {headerLoc} {headerLoc} offset={offsetSectors}
+          [logTrace|Wrote Chunk... {coords} {dataLen}b {headerLoc} {headerLoc} offset={offsetSectors}
                    len={lengthSector} encoded={chunkLoc}|]
           liftIO $ MVector.write locationBuff headerLoc chunkLoc 
 
@@ -312,14 +309,8 @@ readRegion h = do
     let chunkX = i `mod` 32
     let chunkZ = i `div` 32
     [logTrace|inserting chunk ({chunkX}, {chunkZ}) into chunk map|]
-    modifyIORef chunkMapRef $ Map.insert (chunkX, chunkZ) (chunk, 0)
+    modifyIORef chunkMapRef $ Map.insert (chunkX, chunkZ) chunk
 
-  chunkMap' <- readIORef chunkMapRef
-  [logTrace|iterating chunk map and decoding to NBT|]
-  chunkMap <- flip mapM chunkMap' $ \(chunkData, _) ->
-                  case decompressChunkData chunkData of
-                    Left _ -> error "error decompressing chunk data"
-                    Right (NBT "" nbtCont) -> newChunk 0 nbtCont
-                    Right _ -> error "decompressed nbt did not have expected contents"
+  chunkMap <- readIORef chunkMapRef
   return Region { regionChunkMap = chunkMap }
 

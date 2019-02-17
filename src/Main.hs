@@ -16,25 +16,31 @@ import           UnliftIO.IO
 
 import           AppMonad
 
-mutateMap :: Region -> App ()
-mutateMap Region { regionChunkMap } = do
+transmuteSandstoneToWood :: Chunk -> App ()
+transmuteSandstoneToWood Chunk { chunkBlocks } = do
     [logInfo|Running mutateMap|]
     planksId    <- getBlockId "minecraft:planks"
     sandstoneId <- getBlockId "minecraft:sandstone"
-    forM_ regionChunkMap $ \Chunk { chunkBlocks } -> do
-        let len = MVector.length chunkBlocks
-        forM_ [0 .. len - 1] $ \i -> do
-            blockId <- MVector.read chunkBlocks i
-            when (blockId == sandstoneId) $ MVector.write chunkBlocks i planksId
+   
+    let len = MVector.length chunkBlocks
+
+    forM_ [0 .. len - 1] $ \i -> do
+        blockId <- MVector.read chunkBlocks i
+        when (blockId == sandstoneId) $ do
+            MVector.write chunkBlocks i planksId
+
 
 app :: App ()
 app = do
     [logHeadline|starting levelgen|]
     region <- withFile "r.0.0.mca" ReadMode $ \handle -> readRegion handle
     -- mutateMap region
-    prettyPrintBlockPalette
-    doPaletteSwap "minecraft:sandstone" "minecraft:planks"
-    prettyPrintBlockPalette
+    chunk <- loadChunk region (0, 0)
+
+    transmuteSandstoneToWood chunk
+
+    saveChunk region (0, 0) chunk
+
     [logInfo|writing to file|]
     withFile "example/region/r.0.0.mca" WriteMode
         $ \handle -> writeRegion handle region

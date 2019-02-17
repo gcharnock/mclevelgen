@@ -13,6 +13,7 @@ import           Data.NBT
 import           Data.Time.Clock.POSIX          ( POSIXTime )
 import           Data.Word
 import           Data.Int
+import qualified Data.Vector.Unboxed as Vector
 import qualified Data.Vector.Unboxed.Mutable   as MVector
 import           Data.NBT.Lens
 import           Control.Lens
@@ -103,6 +104,9 @@ chunkBlocksToNbt chunkBlocks = do
 
        let palette = listToArray . map (\name -> CompoundTag [NBT "Name" $ StringTag name]) $ paletteList
        [logTrace|computed palette for section was {palette}|]
+
+       blockStates' <- Vector.freeze blocksLocalEncoding
+       [logTrace|computed blockstates for section was {Vector.toList blockStates'}|]
     
        blocksLocalPacked <- encode4BitBlockStates blocksLocalEncoding 
        return $ CompoundTag $ [ NBT "BlockStates" $ LongArrayTag blocksLocalPacked
