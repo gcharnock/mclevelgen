@@ -2,51 +2,13 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wno-overflowed-literals #-}
 
 module Data.Region where
 
 import qualified Data.Text                     as T
-import           Control.Monad.IO.Class
-import           Data.IORef
-import           Control.Monad
-import           Control.Monad.State.Strict     ( execStateT
-                                                , modify'
-                                                )
-import           Codec.Compression.Zlib         ( decompress
-                                                , compress
-                                                )
-import           Data.Bits                      ( shiftR
-                                                , shiftL
-                                                , (.&.)
-                                                , (.|.)
-                                                )
-import           Data.ByteString.Lazy           ( ByteString )
-import qualified Data.ByteString               as B
-import qualified Data.ByteString.Lazy          as LB
-import           Data.Data                      ( Data
-                                                , Typeable
-                                                )
-import           Data.List                      ( mapAccumL )
 import           Data.Map                       ( Map )
-import qualified Data.Map                      as Map
-import           Data.NBT
-import           Data.Time.Clock.POSIX          ( POSIXTime )
-import           Data.Vector                    ( Vector )
-import qualified Data.Vector                   as Vector
-import           Data.Word
-import           Data.Int
-import qualified Data.Vector.Unboxed.Mutable   as MVector
-import qualified Data.Array.Repa               as Repa
-import           Data.NBT.Lens
-import           Control.Lens
-import           Control.Monad.ST
-import           Data.Array.Unboxed
-import           Data.Foldable
-import Data.Key
-import Data.BlockPalette
+import Data.Bits
 import Data.Chunk
 import Data.HashTable.IO as HashTable
 
@@ -66,8 +28,6 @@ data RegionCoord = RegionCoord {
   regionCoordY :: !Int,
   regionCoordZ :: !Int
 } deriving (Show)
-
-
 
 -- Private
 

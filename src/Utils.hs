@@ -1,14 +1,13 @@
 module Utils where
 
-import qualified Data.Text as T
-import Control.Lens 
-import qualified Data.Vector as Vector
-import Data.Array.IArray
+import qualified Data.Text                     as T
+import qualified Data.Vector                   as Vector
+import           Data.Array.IArray
 
 showT :: Show a => a -> T.Text
 showT = T.pack . show
 
-iforM_ :: Monad m => Vector.Vector a -> (Int -> a -> m b) -> m () 
+iforM_ :: Monad m => Vector.Vector a -> (Int -> a -> m b) -> m ()
 iforM_ = flip Vector.imapM_
 
 listToArray :: (Num i, Ix i, IArray a e) => [e] -> a i e

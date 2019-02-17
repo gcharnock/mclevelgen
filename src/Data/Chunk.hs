@@ -6,39 +6,17 @@ import qualified Data.Text                     as T
 import           Control.Monad.IO.Class
 import           Data.IORef
 import           Control.Monad
-import           Control.Monad.State.Strict     ( execStateT
-                                                , modify'
-                                                )
-import           Codec.Compression.Zlib         ( decompress
-                                                , compress
-                                                )
-import           Data.Bits                      ( shiftR
-                                                , shiftL
-                                                , (.&.)
-                                                , (.|.)
-                                                )
-import           Data.ByteString.Lazy           ( ByteString )
-import qualified Data.ByteString               as B
-import qualified Data.ByteString.Lazy          as LB
-import           Data.Data                      ( Data
-                                                , Typeable
-                                                )
-import           Data.List                      ( mapAccumL )
+import           Data.Bits
 import           Data.Map                       ( Map )
 import qualified Data.Map                      as Map
 import           Data.NBT
 import           Data.Time.Clock.POSIX          ( POSIXTime )
-import           Data.Vector                    ( Vector )
-import qualified Data.Vector                   as Vector
 import           Data.Word
 import           Data.Int
 import qualified Data.Vector.Unboxed.Mutable   as MVector
-import qualified Data.Array.Repa               as Repa
 import           Data.NBT.Lens
 import           Control.Lens
-import           Control.Monad.ST
 import           Data.Array.Unboxed
-import           Data.Foldable
 import Data.Key
 import Data.BlockPalette
 import Data.HashTable.IO as HashTable
@@ -57,20 +35,20 @@ data Chunk = Chunk
   }
 
 
-newChunk :: BlockPalette -> POSIXTime -> NbtContents -> App Chunk
-newChunk bp chunkTimestamp contents = do
+newChunk :: POSIXTime -> NbtContents -> App Chunk
+newChunk chunkTimestamp contents = do
   [logTrace|making new chunk from nbt|]
   chunkNbt <- liftIO $ newIORef contents
-  chunkBlocks <- nbtToChunkBlocks bp contents 
+  chunkBlocks <- nbtToChunkBlocks contents 
   return Chunk { chunkTimestamp, chunkNbt, chunkBlocks}
 
-updateChunkBlockNbt :: BlockPalette -> Chunk -> App ()
-updateChunkBlockNbt bp Chunk {chunkBlocks, chunkNbt} = do
+updateChunkBlockNbt :: Chunk -> App ()
+updateChunkBlockNbt Chunk {chunkBlocks, chunkNbt} = do
   [logTrace|starting updateChunkBlockNbt|]
   nbt <- liftIO $ readIORef chunkNbt
   [logTrace|nbt for chunk is {nbt}|]
 
-  newSections <- chunkBlocksToNbt bp chunkBlocks
+  newSections <- chunkBlocksToNbt chunkBlocks
   [logTrace|newSections = {newSections}|]
 
   let nbt' = set (compoundName "Level" . compoundName "Sections") newSections nbt
@@ -87,8 +65,8 @@ buildPaletteMap :: Array Int32 NbtContents -> Map Int T.Text
 buildPaletteMap = Map.fromList . map (over _2 f . over _1 fromIntegral) . assocs 
   where f nbtCont = let Just name = nbtCont ^? compoundName "Name" . lnbtContString in name
 
-nbtToChunkBlocks :: BlockPalette -> NbtContents -> App (MVector.IOVector Word16)
-nbtToChunkBlocks bp nbt = do
+nbtToChunkBlocks :: NbtContents -> App (MVector.IOVector Word16)
+nbtToChunkBlocks nbt = do
   let Just sections = nbt ^? compoundName "Level" . compoundName "Sections" . lnbtContList 
   blocks <- MVector.new $ 16 * 16 * 256
   forM_ sections $ \section -> do
@@ -103,7 +81,7 @@ nbtToChunkBlocks bp nbt = do
       let y = sectionY * 16 + ((i `div` 16) `mod` 16)
       let z = i `div` 256
       let Just mcBlockId = Map.lookup blockState localBP
-      gBlockId <- getBlockId bp mcBlockId
+      gBlockId <- getBlockId mcBlockId
       MVector.write blocks (toChunkMem x y z) gBlockId
   return blocks
 
@@ -113,12 +91,12 @@ blockLight = ByteArrayTag $ listToArray $ replicate 2048 0
 skylight :: NbtContents
 skylight = ByteArrayTag $ listToArray $ replicate 2048 0
 
-chunkBlocksToNbt :: HasCallStack => BlockPalette -> MVector.IOVector Word16 -> App NbtContents
-chunkBlocksToNbt bp chunkBlocks = do
+chunkBlocksToNbt :: HasCallStack => MVector.IOVector Word16 -> App NbtContents
+chunkBlocksToNbt chunkBlocks = do
   sectionsList <- forM [0, 1, 2, 3, 4] $ \i -> do
        [logTrace|converting section {i} to NBT format|]
        let sectionSlice = MVector.slice (i * 4096) 4096 chunkBlocks
-       (blocksLocalEncoding, paletteList) <- encodeSectorPalette bp sectionSlice 
+       (blocksLocalEncoding, paletteList) <- encodeSectorPalette sectionSlice 
 
        let blockIdCount = length paletteList
        [logTrace|blockIdCount = {blockIdCount}|]
@@ -156,8 +134,8 @@ decode4BitBlockStates theArray =
         , (i64 .&. 0xF000000000000000) `shiftR` 60
         ]
 
-encodeSectorPalette :: BlockPalette -> MVector.IOVector Word16 -> App (MVector.IOVector Int32, [T.Text])
-encodeSectorPalette bp blocks = do
+encodeSectorPalette :: MVector.IOVector Word16 -> App (MVector.IOVector Int32, [T.Text])
+encodeSectorPalette blocks = do
   [logTrace|Running encodeSectorPalette
     -resolve global block ids with the block palette and produce a list of unique minecraft
      block ids and a buffer of blocks encoded as indexes into that list
@@ -172,7 +150,7 @@ encodeSectorPalette bp blocks = do
 
   forM_ [0..MVector.length blocks - 1] $ \i -> do
     gBlockId <- liftIO $ MVector.read blocks i
-    mcName <- getMCName bp gBlockId
+    mcName <- getMCName gBlockId
     localId <- (liftIO $ HashTable.lookup localBp mcName) >>= \case
       Just localId -> return localId
       Nothing -> do

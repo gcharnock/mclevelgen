@@ -9,9 +9,6 @@ module Anvil where
 
 import Control.Monad.IO.Class
 import           Control.Monad
-import           Control.Monad.State.Strict     ( execStateT
-                                                , modify'
-                                                )
 import           Codec.Compression.Zlib         ( decompress
                                                 , compress
                                                 )
@@ -26,8 +23,6 @@ import qualified Data.ByteString.Lazy          as LB
 import           Data.Data                      ( Data
                                                 , Typeable
                                                 )
-import           Data.List                      ( mapAccumL )
-import           Data.Map                       ( Map )
 import qualified Data.Map                      as Map
 import           Data.NBT
 import           Data.Serialize                 ( Serialize(..)
@@ -58,19 +53,15 @@ import           Pipes.Cereal                   ( decodeGet
                                                 )
 import           Pipes.Parse                    ( runStateT )
 import qualified Pipes
-import           Pipes                          ( Pipe
-                                                , runEffect
+import           Pipes                          ( runEffect
                                                 , (>->)
                                                 , (<-<)
-                                                , await
                                                 , each
                                                 , yield
                                                 )
 import           System.IO                      ( Handle
                                                 , SeekMode(AbsoluteSeek)
                                                 )
-import Data.BlockPalette
-import Numeric
 import Data.Region
 import Data.Chunk
 import Utils
@@ -122,7 +113,7 @@ putChunkLocation ChunkLocation { chunkOffset = offset, chunkLength = len } = do
   putWord8 len
 
 encodeChunkLocation :: Word32 -> Word32 -> Word32
-encodeChunkLocation offset length = (offset .&. 0xFFFFFF) .|. ((length .&.  0xFF) `shiftL` 24)
+encodeChunkLocation offset len = (offset .&. 0xFFFFFF) .|. ((len .&.  0xFF) `shiftL` 24)
 
 getChunkLocation :: Get ChunkLocation
 getChunkLocation = do
@@ -152,9 +143,9 @@ showAnvilHeader ah = show $ AnvilHeader
 
 
 visualiseChunks :: AnvilHeader -> String
-visualiseChunks AnvilHeader { locations } = unlines lines
+visualiseChunks AnvilHeader { locations } = unlines lines'
  where
-  lines =
+  lines' =
     [ map
         (\x -> if emptyChunkLocation /= (locations ! (32 * z + x))
           then '*'
@@ -248,11 +239,11 @@ decompressChunkData cd
     (chunkDataCompression cd)
 
 -- | NBT needs to be a Chunk
-compressChunkData :: BlockPalette -> Chunk -> App ZippedChunkData
-compressChunkData bp chunk@Chunk {chunkNbt} = do
+compressChunkData :: Chunk -> App ZippedChunkData
+compressChunkData chunk@Chunk {chunkNbt} = do
   [logInfo|running compressChunkData|]
 
-  updateChunkBlockNbt bp chunk 
+  updateChunkBlockNbt chunk 
   [logTrace|block nbt for chunk as been updated|]
 
   chunkNbt' <- liftIO $ readIORef chunkNbt
@@ -277,8 +268,8 @@ chunkCoordsToHeaderLoc (chunkX, chunkZ) = chunkX + chunkZ * 32
 putVecW32 :: Vector Word32 -> Put
 putVecW32 = Vector.mapM_ putWord32be
 
-writeRegion :: BlockPalette -> Handle -> Region -> App ()
-writeRegion bp h Region { regionChunkMap } = do
+writeRegion :: Handle -> Region -> App ()
+writeRegion h Region { regionChunkMap } = do
   [logInfo|writeRegion: writing a region to disk|]
   let chunks = Map.toAscList regionChunkMap
 
@@ -296,7 +287,7 @@ writeRegion bp h Region { regionChunkMap } = do
         Pipes.for (each chunks) $ \(coords, chunk) -> do
           [logInfo|running producer over chunk with coords {coords}|]
           
-          zippedChunkData <- lift $ compressChunkData bp chunk
+          zippedChunkData <- lift $ compressChunkData chunk
           let dataLen = chunkDataLength zippedChunkData
           [logTrace|length of compressed data was {dataLen}|]
 
@@ -349,8 +340,8 @@ writeRegion bp h Region { regionChunkMap } = do
   --runEffect $ anvilHeaderProducer >-> consumer
   pure ()
 
-readRegion :: BlockPalette -> Handle -> App Region
-readRegion bp h = do
+readRegion :: Handle -> App Region
+readRegion h = do
   [logInfo|starting readRegion|]
 
   [logTrace|createing empty chunk map|]
@@ -361,8 +352,10 @@ readRegion bp h = do
   (Right header, leftover) <- runEffect $ runStateT (decodeGet getAnvilHeader) producer
   let locs = locations header
 
-  [logInfo|iterating chunk locations|]
-  iforM_ locs $ \i ChunkLocation {chunkOffset, chunkLength} -> do
+  [logInfo|reading all chunk locations|]
+  iforM_ locs $ \i ChunkLocation {} -> do
+    -- TODO: I think we might be reading the same chunk over and over here
+    -- as we're not using the chunk location.
     [logTrace|loading chunk described at header location {i}|]
     (Right chunk, _) <- runEffect $ runStateT (decodeGet getChunkData) leftover
     let chunkX = i `mod` 32
@@ -374,6 +367,8 @@ readRegion bp h = do
   [logTrace|iterating chunk map and decoding to NBT|]
   chunkMap <- flip mapM chunkMap' $ \(chunkData, _) ->
                   case decompressChunkData chunkData of
-                    Right (NBT "" nbtCont) -> newChunk bp 0 nbtCont
+                    Left _ -> error "error decompressing chunk data"
+                    Right (NBT "" nbtCont) -> newChunk 0 nbtCont
+                    Right _ -> error "decompressed nbt did not have expected contents"
   return Region { regionChunkMap = chunkMap }
 

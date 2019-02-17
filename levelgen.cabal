@@ -17,7 +17,7 @@ cabal-version:       >=1.10
 
 executable levelgen
   main-is:             Main.hs
-  ghc-options:         -rtsopts -O2 -fprof-auto
+  ghc-options:         -rtsopts -O2 -fprof-auto -Wall
   other-modules:       Anvil
                        AppMonad
                        Utils
@@ -34,6 +34,7 @@ executable levelgen
                        BangPatterns
                        LambdaCase
                        QuasiQuotes
+                       ConstraintKinds 
 
   build-depends:       array,
                        base,

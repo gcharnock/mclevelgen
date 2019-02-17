@@ -1,16 +1,16 @@
 
-module Data.BlockPalette (BlockPalette, newBlockPalette, getMCName, getBlockId, prettyPrintBlockPalette, doPaletteSwap) where
+module Data.BlockPalette (BlockPalette, HasBP(..), newBlockPalette, getMCName, getBlockId, prettyPrintBlockPalette, doPaletteSwap) where
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.IORef
 import Data.Word
 import qualified Data.HashTable.IO as HashTable
-import qualified Utils
 import Control.Monad.IO.Class
+import Control.Monad.Reader.Class
 
+import Logging.Contextual
 import Logging.Contextual.BasicScheme
-import AppMonad
 
 type HashTable k v = HashTable.BasicHashTable k v
 
@@ -20,13 +20,22 @@ data BlockPalette = BlockPalette
  , nextIdRef :: !(IORef Word16)
  }
 
-newBlockPalette :: App BlockPalette
+class HasBP a where
+  getBP :: a -> BlockPalette
+
+type BP env m = (MonadReader env m, HasLog env, HasBP env, MonadIO m)
+
+askBP :: (MonadReader env m, HasBP env) => m BlockPalette
+askBP = fmap getBP ask
+
+newBlockPalette :: (HasLog env, MonadReader env m, MonadIO m) => m BlockPalette
 newBlockPalette = do
   [logTrace|creating new block palette|]
   liftIO $ BlockPalette <$> HashTable.new <*> HashTable.new <*> newIORef 0
 
-getBlockId :: BlockPalette -> T.Text -> App Word16
-getBlockId BlockPalette { nextIdRef, toMCName, fromMCName } mcName = do
+getBlockId :: (BP env m) => T.Text -> m Word16
+getBlockId mcName = do
+  BlockPalette {toMCName, fromMCName, nextIdRef } <- askBP
   result <- liftIO $ HashTable.lookup fromMCName mcName
   case result of
     Just blockId -> return blockId
@@ -38,18 +47,19 @@ getBlockId BlockPalette { nextIdRef, toMCName, fromMCName } mcName = do
       liftIO $ writeIORef nextIdRef (nextId + 1)
       return nextId
 
-getMCName :: BlockPalette -> Word16 -> App T.Text
-getMCName BlockPalette { toMCName } blockId = do
+getMCName :: (BP env m) => Word16 -> m T.Text
+getMCName blockId = do
+  BlockPalette {toMCName} <- askBP
   result <- liftIO $ HashTable.lookup toMCName blockId
   case result of
     Nothing -> error $ "failed to lookup block id " <> show blockId
     Just mcName -> return mcName
 
-doPaletteSwap :: BlockPalette -> T.Text -> T.Text -> App ()
-doPaletteSwap BlockPalette {toMCName, fromMCName} oldMCBlockId newMCBlockId = do
-  liftIO $ do
-    blockId <- HashTable.lookup fromMCName oldMCBlockId
-    case blockId of
+doPaletteSwap :: (BP env m) => T.Text -> T.Text -> m ()
+doPaletteSwap oldMCBlockId newMCBlockId = do
+  BlockPalette {toMCName, fromMCName} <- askBP
+  liftIO $
+    HashTable.lookup fromMCName oldMCBlockId >>= \case
       Nothing -> error "no such block id"
       Just blockId -> do
         HashTable.insert toMCName blockId newMCBlockId
@@ -57,6 +67,8 @@ doPaletteSwap BlockPalette {toMCName, fromMCName} oldMCBlockId newMCBlockId = do
         HashTable.insert fromMCName newMCBlockId blockId
 
 
-prettyPrintBlockPalette :: BlockPalette -> IO ()
-prettyPrintBlockPalette BlockPalette { fromMCName } =
-  flip HashTable.mapM_ fromMCName $ \(k, v) -> T.putStrLn $ k <> " --> " <> T.pack (show v)
+prettyPrintBlockPalette :: (BP env m) =>  m ()
+prettyPrintBlockPalette = do
+  BlockPalette { fromMCName } <- askBP
+  liftIO $ flip HashTable.mapM_ fromMCName $ \(k, v) ->
+    T.putStrLn $ k <> " --> " <> T.pack (show v)
